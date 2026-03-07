@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="vi">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>HR Chatbot Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 760px;
+            margin: 24px auto;
+        }
+
+        textarea {
+            width: 100%;
+            height: 80px;
+        }
+
+        pre {
+            background: #f5f5f5;
+            padding: 12px;
+            white-space: pre-wrap;
+        }
+
+        .row {
+            display: flex;
+            gap: 8px;
+            margin-top: 8px;
+        }
+
+        button {
+            padding: 8px 14px;
+        }
+
+        input {
+            padding: 8px;
+            flex: 1;
+        }
+    </style>
+</head>
+
+<body>
+    <h2>HR Chatbot Test (Web)</h2>
+
+    <h3>/chat</h3>
+    <div class="row">
+        <input id="msg" placeholder="Nhập câu hỏi..." />
+        <button onclick="sendChat()">Gửi</button>
+    </div>
+    <pre id="chatOut"></pre>
+
+    <h3>/admin/unknown-questions</h3>
+    <button onclick="loadUnknown()">Load unknown</button>
+    <pre id="unknownOut"></pre>
+
+    <h3>/admin/approve-unknown</h3>
+    <div class="row">
+        <input id="unknownId" placeholder="unknown_id (vd: 7)" />
+        <input id="intentId" placeholder="intent_id (optional)" />
+        <button onclick="approveUnknown()">Approve</button>
+    </div>
+    <pre id="approveOut"></pre>
+
+    <script>
+
+        let currentSessionId = null;
+        async function createSession() {
+            const res = await fetch(`${API}/chat/session?user_id=3`, {
+                method: "POST"
+            });
+            const data = await res.json();
+            currentSessionId = data.session_id;
+        }
+
+        const API = "https://chatbotfastapi-production-650d.up.railway.app";
+
+        async function sendChat() {
+            if (!currentSessionId) {
+                await createSession();
+            }
+
+            const message = document.getElementById("msg").value;
+            const out = document.getElementById("chatOut");
+
+            const res = await fetch(`${API}/chat`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    message,
+                    session_id: currentSessionId
+                })
+            });
+
+            out.textContent = await res.text();
+        }
+
+        async function loadUnknown() {
+            const out = document.getElementById("unknownOut");
+            out.textContent = "Đang tải...";
+            const res = await fetch(`${API}/admin/unknown-questions`);
+            out.textContent = await res.text();
+        }
+
+        async function approveUnknown() {
+            const unknown_id = parseInt(document.getElementById("unknownId").value, 10);
+            const intentIdStr = document.getElementById("intentId").value.trim();
+            const body = { unknown_id };
+            if (intentIdStr) body.intent_id = parseInt(intentIdStr, 10);
+
+            const out = document.getElementById("approveOut");
+            out.textContent = "Đang approve...";
+            const res = await fetch(`${API}/admin/approve-unknown`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body)
+            });
+            out.textContent = await res.text();
+        }
+    </script>
+</body>
+
+</html>
