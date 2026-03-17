@@ -1,13 +1,13 @@
-from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import create_engine, text
-from fastapi import Query
-
+from sqlalchemy import text
 from mini_llm.llm_client import call_llm, call_sql_llm
 from mini_llm.db_schema import SCHEMA_TEXT
-
-
+from fastapi import FastAPI, Query, Depends
+from middleware.dependency import get_current_user
+from db import engine
+import os
 app = FastAPI()
 
 app.add_middleware(
@@ -21,7 +21,6 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     message: str
     session_id: int
-    user_id: int
 
 
 class SQLRequest(BaseModel):
@@ -41,31 +40,24 @@ def is_safe_sql(sql: str):
 # =======================
 # Database
 # =======================
-DATABASE_URL = "mysql+pymysql://root:oyiywCYcRXgEFQwGRccBWelkPthPjNHC@nozomi.proxy.rlwy.net:53106/railway"
-engine = create_engine(
-    DATABASE_URL, pool_pre_ping=True, pool_recycle=3600, pool_size=5, max_overflow=10
-)
 
-
-# test
-print(DATABASE_URL)
 
 
 @app.post("/chat_nl2sql")
-def chat_nl2sql(req: ChatRequest):
+def chat_nl2sql(req: ChatRequest, current_user=Depends(get_current_user)):
+    user_id = current_user["user_id"]
+    employee_id = current_user["employee_id"]
 
-    user_id = req.user_id
     question = req.message
     session_id = req.session_id
 
-    # ===== CHECK SESSION =====
     if not validate_session(user_id, session_id):
         return {"reply": "Session không hợp lệ."}
 
-    # ===== GET EMPLOYEE =====
-    employee_id = get_employee_id(user_id)
     if not employee_id:
         return {"reply": "Không tìm thấy nhân viên."}
+
+    # giữ phần còn lại như cũ
 
     q_low = question.lower()
 
@@ -204,8 +196,7 @@ Chỉ trả về SQL thuần.
         # sai phổ biến: dùng rolling window thay vì calendar month
         return ("date >=" in s and "date_sub(current_date" in s) or (
             "between date_sub(current_date" in s and "current_date" in s
-    )
-
+        )
 
     def violates_limit_in_subquery(sql: str) -> bool:
         s = " ".join(sql.lower().split())
@@ -324,7 +315,7 @@ Chỉ trả về SQL thuần.
         )
     print("DEBUG SQL FIX LEAVE_YEAR_MONTH:", generated_sql)
 
-        # ===== RETRY: fix LIMIT bên trong IN (...) cho N tháng gần nhất =====
+    # ===== RETRY: fix LIMIT bên trong IN (...) cho N tháng gần nhất =====
     if (
         ("tháng gần nhất" in q_low or "tháng gần đây" in q_low or "gần nhất" in q_low)
         and ("tổng" in q_low or "trung bình" in q_low or "avg" in q_low)
@@ -454,7 +445,9 @@ Chỉ trả lời nội dung.
 
 
 @app.post("/chat/session")
-def create_chat_session(user_id: int = Query(...)):
+def create_chat_session(current_user=Depends(get_current_user)):
+    user_id = current_user["user_id"]
+
     with engine.begin() as conn:
         result = conn.execute(
             text(
@@ -466,6 +459,7 @@ def create_chat_session(user_id: int = Query(...)):
             {"uid": user_id},
         )
         sid = result.lastrowid
+
     return {"session_id": int(sid)}
 
 
@@ -484,6 +478,7 @@ def get_employee_id(user_id: int):
             {"uid": user_id},
         ).fetchone()
     return row[0] if row else None
+
 
 def save_chat_history(engine, user_id, session_id, message, bot_response, intent=None):
     try:
@@ -509,6 +504,7 @@ def save_chat_history(engine, user_id, session_id, message, bot_response, intent
             )
     except Exception as e:
         print("WARN save_chat_history skipped:", str(e))
+
 
 def validate_session(user_id: int, session_id: int):
     with engine.connect() as conn:
@@ -740,15 +736,18 @@ def home():
 
 
 @app.get("/chat/sessions")
-def get_chat_sessions(user_id: int = Query(...), limit: int = Query(10)):
+def get_chat_sessions(
+    limit: int = Query(10),
+    current_user=Depends(get_current_user),
+):
+    user_id = current_user["user_id"]
+
     with engine.connect() as conn:
         rows = conn.execute(
-            text(
-                """
+            text("""
                 SELECT
                     cs.session_id,
                     cs.started_at,
-                    -- tin nhắn đầu tiên trong session làm title
                     (
                         SELECT ch1.message
                         FROM chat_history ch1
@@ -756,7 +755,6 @@ def get_chat_sessions(user_id: int = Query(...), limit: int = Query(10)):
                         ORDER BY ch1.created_at ASC
                         LIMIT 1
                     ) AS title,
-                    -- tin nhắn cuối cùng để preview
                     (
                         SELECT ch2.message
                         FROM chat_history ch2
@@ -775,15 +773,13 @@ def get_chat_sessions(user_id: int = Query(...), limit: int = Query(10)):
                 WHERE cs.user_id = :uid
                 ORDER BY COALESCE(last_at, cs.started_at) DESC
                 LIMIT :limit
-            """
-            ),
+            """),
             {"uid": user_id, "limit": limit},
         ).fetchall()
 
     result = []
     for r in rows:
         session_id, started_at, title, last_message, last_at = r
-        # giữ key created_at cho frontend (bạn đang dùng)
         display_time = last_at or started_at
         result.append(
             {
@@ -798,17 +794,22 @@ def get_chat_sessions(user_id: int = Query(...), limit: int = Query(10)):
     return result
 
 
+
+
 @app.delete("/chat/session/{session_id}")
-def delete_chat_session(session_id: int, user_id: int = Query(...)):
-    """
-    Xóa 1 session của user + toàn bộ chat_history thuộc session đó.
-    """
+def delete_chat_session(
+    session_id: int,
+    current_user=Depends(get_current_user),
+):
+    user_id = current_user["user_id"]
+
     with engine.begin() as conn:
-        # đảm bảo session thuộc user (tránh xóa nhầm user khác)
         owner = conn.execute(
-            text(
-                "SELECT 1 FROM chat_sessions WHERE session_id = :sid AND user_id = :uid"
-            ),
+            text("""
+                SELECT 1
+                FROM chat_sessions
+                WHERE session_id = :sid AND user_id = :uid
+            """),
             {"sid": session_id, "uid": user_id},
         ).fetchone()
 
@@ -818,13 +819,10 @@ def delete_chat_session(session_id: int, user_id: int = Query(...)):
                 "message": "Session không tồn tại hoặc không thuộc user.",
             }
 
-        # xóa lịch sử trước
         conn.execute(
             text("DELETE FROM chat_history WHERE session_id = :sid"),
             {"sid": session_id},
         )
-
-        # rồi xóa session
         conn.execute(
             text("DELETE FROM chat_sessions WHERE session_id = :sid"),
             {"sid": session_id},
@@ -834,18 +832,34 @@ def delete_chat_session(session_id: int, user_id: int = Query(...)):
 
 
 @app.get("/chat/history/{session_id}")
-def get_chat_history_by_session(session_id: int):
+def get_chat_history_by_session(
+    session_id: int,
+    current_user=Depends(get_current_user),
+):
+    user_id = current_user["user_id"]
+
     with engine.connect() as conn:
+        owner = conn.execute(
+            text("""
+                SELECT 1
+                FROM chat_sessions
+                WHERE session_id = :sid
+                  AND user_id = :uid
+            """),
+            {"sid": session_id, "uid": user_id},
+        ).fetchone()
+
+        if not owner:
+            return {"ok": False, "message": "Không có quyền xem session này."}
+
         rows = conn.execute(
-            text(
-                """
+            text("""
                 SELECT message, bot_response, created_at
                 FROM chat_history
                 WHERE session_id = :sid
                 ORDER BY created_at DESC
                 LIMIT 10
-            """
-            ),
+            """),
             {"sid": session_id},
         ).fetchall()
 
@@ -871,72 +885,3 @@ def get_chat_history_by_session(session_id: int):
     return messages
 
 
-# =======================
-# Chat API
-# =======================
-@app.post("/chat")
-def chat(req: ChatRequest):
-    user_id = req.user_id
-    message = req.message
-    session_id = req.session_id
-    text_norm = normalize_text(message)
-
-    employee_id = get_employee_id(user_id)
-    if not employee_id:
-        return {"reply": "Không tìm thấy thông tin nhân viên."}
-
-    time_ctxs = extract_times(text_norm)
-
-    if not time_ctxs:
-        time_ctxs = [{"type": "relative", "value": "current_month"}]
-
-    # =======================
-    # GOM DỮ LIỆU TRƯỚC
-    # =======================
-    salary_contexts = []
-    attendance_contexts = []
-    late_early_contexts = []
-
-    for time_ctx in time_ctxs:
-        salary = get_salary(employee_id, time_ctx)
-        salary_contexts.append({"time_ctx": time_ctx, "salary": salary})
-
-        days = get_attendance_days(employee_id, time_ctx)
-        attendance_contexts.append({"time_ctx": time_ctx, "days": days})
-
-        late_early = get_late_early(employee_id, time_ctx)
-        print("DEBUG time_ctx =", time_ctx)
-        print("DEBUG late_early =", late_early)
-
-        late_early_contexts.append(
-            {
-                "time_ctx": time_ctx,
-                "late_days": late_early["late_days"],
-                "early_days": late_early["early_days"],
-            }
-        )
-
-    leave_days = get_remaining_leave(employee_id)
-    used_leave_days = 12 - leave_days
-
-    user_ctx = {
-        "salary_contexts": salary_contexts,
-        "attendance_contexts": attendance_contexts,
-        "leave_days": leave_days,
-        "used_leave_days": used_leave_days,
-        "late_early_contexts": late_early_contexts,
-    }
-
-    reply = hr_chatbot(question=text_norm, user_ctx=user_ctx)
-
-    # LƯU CHAT HISTORY
-    save_chat_history(
-        engine=engine,
-        user_id=user_id,
-        session_id=session_id,
-        message=message,
-        bot_response=reply,
-        intent=None,
-    )
-
-    return {"reply": reply}
