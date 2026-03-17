@@ -21,6 +21,7 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     message: str
     session_id: int
+    user_id: int
 
 
 class SQLRequest(BaseModel):
@@ -53,7 +54,7 @@ print(DATABASE_URL)
 @app.post("/chat_nl2sql")
 def chat_nl2sql(req: ChatRequest):
 
-    user_id = 3
+    user_id = req.user_id
     question = req.message
     session_id = req.session_id
 
@@ -875,7 +876,7 @@ def get_chat_history_by_session(session_id: int):
 # =======================
 @app.post("/chat")
 def chat(req: ChatRequest):
-    user_id = 3  # TODO: sau này lấy từ login/JWT
+    user_id = req.user_id
     message = req.message
     session_id = req.session_id
     text_norm = normalize_text(message)
